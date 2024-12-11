@@ -1,0 +1,1 @@
+ Implementation based on "Rao-Blackwellization of Sampling Schemes" by George Casella and Christian P. Robert 

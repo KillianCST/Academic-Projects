@@ -1,0 +1,1 @@
+This repository has been created to display some of the projects I did during my M1 at Sorbonne Université and M2 at Paris-Dauphine
