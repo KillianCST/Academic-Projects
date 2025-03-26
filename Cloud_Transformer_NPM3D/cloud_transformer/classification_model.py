@@ -1,11 +1,11 @@
 import torch
 from torch import nn
-from torch.nn.init import xavier_uniform_, constant_
-
 from cloud_transformer.ResBlock.v2v_groups import Res3DBlock, Pool3DBlock
 from cloud_transformer.ResBlock.unet_parts import Res2DBlock
 from cloud_transformer.multihead_union import MultiHeadUnionAttention
 from cloud_transformer.multihead_pool import MultiHeadPool
+from cloud_transformer.improvements import ChannelLayerNorm
+from cloud_transformer.hierarchical_improvement import HierarchicalMultiHeadAttention, MultiInputSequential
 
 
 class CT_Classifier(nn.Module):
@@ -18,6 +18,9 @@ class CT_Classifier(nn.Module):
         dropout: float = 0.5,
         use_scales: bool = True,
         use_checkpoint: bool = False,
+        use_softmax: bool = False,
+        scale_layer_norm: bool = False,
+        hierarchical: bool = False,
     ):
         super().__init__()
 
@@ -28,6 +31,9 @@ class CT_Classifier(nn.Module):
         self.dropout = dropout
         self.use_checkpoint = use_checkpoint
         self.use_scales = use_scales
+        self.use_softmax = use_softmax
+        self.scale_layer_norm = scale_layer_norm
+        self.hierarchical = hierarchical
 
         self.first_process = nn.Sequential(
             nn.Conv1d(3, model_dim, kernel_size=1, bias=False),
@@ -35,55 +41,71 @@ class CT_Classifier(nn.Module):
             nn.ReLU(inplace=True),
         )
 
-        self.attentions_encoder = nn.ModuleList(
-            [
-                branch
-                for _ in range(num_layers)
-                for branch in [
-                    MultiHeadUnionAttention(
+        self.attentions_encoder = nn.ModuleList()
+        if hierarchical:
+            for _ in range(num_layers):
+                attention_block = HierarchicalMultiHeadAttention(
+                    input_dim=model_dim,
+                    heads=heads,
+                    use_scales=use_scales,
+                    use_checkpoint=use_checkpoint,
+                    use_softmax=use_softmax,
+                )
+                if scale_layer_norm:
+                    attention_block = MultiInputSequential(
+                        attention_block,
+                        ChannelLayerNorm(model_dim),
+                    )
+                self.attentions_encoder.append(attention_block)
+        else:
+            for _ in range(num_layers):
+                for params in [
+                    ([4, 4], [128, 32]),
+                    ([16, 16], [64, 16]),
+                    ([16, 32], [16, 8]),
+                ]:
+                    attention_block = MultiHeadUnionAttention(
                         input_dim=model_dim,
-                        features_dims=[4, 4],
+                        feature_dims=params[0],
                         num_heads_list=[heads, heads],
-                        grid_sizes=[128, 32],
+                        grid_sizes=params[1],
                         grid_dims=[2, 3],
                         output_dim=model_dim,
                         use_scales=use_scales,
                         use_checkpoint=use_checkpoint,
-                    ),
-                    MultiHeadUnionAttention(
-                        input_dim=model_dim,
-                        features_dims=[16, 16],
-                        num_heads_list=[heads, heads],
-                        grid_sizes=[64, 16],
-                        grid_dims=[2, 3],
-                        output_dim=model_dim,
-                        use_scales=use_scales,
-                        use_checkpoint=use_checkpoint,
-                    ),
-                    MultiHeadUnionAttention(
-                        input_dim=model_dim,
-                        features_dims=[16, 32],
-                        num_heads_list=[heads, heads],
-                        grid_sizes=[16, 8],
-                        grid_dims=[2, 3],
-                        output_dim=model_dim,
-                        use_scales=use_scales,
-                        use_checkpoint=use_checkpoint,
-                    ),
-                ]
-            ]
+                        use_softmax=use_softmax,
+                    )
+                    if scale_layer_norm:
+                        attention_block = MultiInputSequential(
+                            attention_block,
+                            ChannelLayerNorm(model_dim),
+                        )
+                    self.attentions_encoder.append(attention_block)
+
+        def pool_block(pool, dim_out):
+            layers = [pool]
+            if scale_layer_norm:
+                layers += [ChannelLayerNorm(dim_out)]
+            return MultiInputSequential(*layers)
+
+
+        pool3d_out = 32 * heads
+        pool2d_out = 16 * heads
+
+        self.pool3d = pool_block(
+            MultiHeadPool(
+                model_dim=model_dim,
+                feature_dim=32,
+                grid_size=8,
+                grid_dim=3,
+                num_heads=heads,
+                scales=use_scales,
+                use_checkpoint=use_checkpoint,
+                use_softmax=use_softmax,
+            ),
+            pool3d_out,
         )
 
-        self.pool3d = MultiHeadPool(
-            model_dim=model_dim,
-            feature_dim=32,
-            grid_size=8,
-            grid_dim=3,
-            num_heads=heads,
-            scales=use_scales,
-            use_checkpoint=use_checkpoint,
-        )
-        pool3d_out = 32 * heads
         self.after_pool3d = nn.Sequential(
             Res3DBlock(pool3d_out, 64 * heads, groups=16),
             Pool3DBlock(2),
@@ -93,16 +115,20 @@ class CT_Classifier(nn.Module):
             nn.AdaptiveAvgPool3d((1, 1, 1)),
         )
 
-        self.pool2d = MultiHeadPool(
-            model_dim=model_dim,
-            feature_dim=16,
-            grid_size=16,
-            grid_dim=2,
-            num_heads=heads,
-            scales=use_scales,
-            use_checkpoint=use_checkpoint,
+        self.pool2d = pool_block(
+            MultiHeadPool(
+                model_dim=model_dim,
+                feature_dim=16,
+                grid_size=16,
+                grid_dim=2,
+                num_heads=heads,
+                scales=use_scales,
+                use_checkpoint=use_checkpoint,
+                use_softmax=use_softmax,
+            ),
+            pool2d_out,
         )
-        pool2d_out = 16 * heads
+
         self.after_pool2d = nn.Sequential(
             Res2DBlock(pool2d_out, 32 * heads, groups=16),
             nn.MaxPool2d(2),
@@ -117,10 +143,8 @@ class CT_Classifier(nn.Module):
             nn.BatchNorm1d(1024),
             nn.ReLU(inplace=True),
         )
-        self.class_head = nn.Sequential(
-            nn.Dropout(dropout),
-            nn.Linear(1024, n_classes),
-        )
+
+        self.class_head = nn.Sequential(nn.Dropout(dropout), nn.Linear(1024, n_classes))
 
         self.mask_head = nn.Sequential(
             nn.Conv1d(model_dim + 1024, 256, kernel_size=1, bias=False),
@@ -130,16 +154,6 @@ class CT_Classifier(nn.Module):
             nn.Conv1d(256, 1, kernel_size=1),
         )
 
-      
-    def _reset_parameters(self):
-        for m in self.modules():
-            if isinstance(m, (nn.Conv1d, nn.Conv2d, nn.Conv3d, nn.Linear)):
-                xavier_uniform_(m.weight)
-                if m.bias is not None:
-                    constant_(m.bias, 0)
-            elif isinstance(m, (nn.BatchNorm1d, nn.BatchNorm2d, nn.BatchNorm3d)):
-                constant_(m.weight, 1)
-                constant_(m.bias, 0)
 
     def forward(self, x):
         x = x.permute(0, 2, 1)
@@ -147,12 +161,12 @@ class CT_Classifier(nn.Module):
 
         x = self.first_process(x)
         for attention in self.attentions_encoder:
-            x, _ = attention(x, orig)
+            x = attention(x, orig)
 
-        to_3d, _ = self.pool3d(x, orig)
+        to_3d = self.pool3d(x, orig)
         pooled_3d = self.after_pool3d(to_3d).reshape(x.size(0), -1)
 
-        to_2d, _ = self.pool2d(x, orig)
+        to_2d = self.pool2d(x, orig)
         pooled_2d = self.after_pool2d(to_2d).reshape(x.size(0), -1)
 
         class_vect = self.class_vector(torch.cat([pooled_2d, pooled_3d], dim=1))

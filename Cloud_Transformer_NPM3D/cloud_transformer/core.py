@@ -4,7 +4,7 @@ import numpy as np
 import torch
 from torch import nn
 from torch_scatter import scatter_max
-from cloud_transformer.utils_ct import trilinear_coords, bilinear_coords # type: ignore
+from cloud_transformer.utils_ct import trilinear_coords, bilinear_coords 
 
 
 class GradientBalancing(torch.autograd.Function):
@@ -223,3 +223,6 @@ class Slice(DifferentiableGridModule):
             sliced = sliced * pts_padding[:, None, :]
 
         return sliced
+    
+
+

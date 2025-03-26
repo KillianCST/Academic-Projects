@@ -89,21 +89,6 @@ class ShapeNetCompletionDataset(Dataset):
         partial_np = np.asarray(o3d.io.read_point_cloud(entry['partial_path']).points, dtype=np.float32)
         complete_np = np.asarray(o3d.io.read_point_cloud(entry['complete_path']).points, dtype=np.float32)
 
-        # Center both on the full (complete) centroid
-        centroid = complete_np.mean(axis=0)
-        partial_np -= centroid
-        complete_np -= centroid
-
-        # Compute scale as the max distance among **all** points (complete ∪ partial)
-        max_complete = np.linalg.norm(complete_np, axis=1).max()
-        max_partial  = np.linalg.norm(partial_np, axis=1).max()
-        scale = max(max_complete, max_partial)
-
-        if scale > 0:
-            partial_np  /= scale
-            complete_np /= scale
-    
-
         # Train‑only mirror augmentation
         if self.split == 'train' and random.random() < 0.5:
             partial_np[:, 0] *= -1
@@ -145,9 +130,12 @@ def visualize_completion(
     for _ in range(batch_idx + 1):
         batch = next(it)
 
-    partial = batch['partial_enc'].to(device)   # use encoder input = partial cloud
+    partial_enc = batch['partial_enc'].to(device)
+    partial_noise = batch['partial_noise'].to(device)
+
     with torch.no_grad():
-        pred, _ = model(batch['partial_noise'].to(device), partial)
+      
+        pred = model(partial_noise, partial_enc).permute(0, 2, 1)  # → [B, N, 3]
 
     num_samples = min(num_samples, pred.shape[0])
     try:
@@ -155,23 +143,28 @@ def visualize_completion(
     except RuntimeError:
         pass
 
+    def make_pcd(points, color):
+        pcd = o3d.geometry.PointCloud()
+        pcd.points = o3d.utility.Vector3dVector(points)
+        pcd.paint_uniform_color(color)
+        return pcd
+
+    import numpy as np
+
     for i in range(num_samples):
-        partial_np = partial[i].cpu().numpy()
-        pred_np    = pred[i].permute(1, 0).cpu().numpy()
+        partial_np = partial_enc[i].cpu().numpy().astype(np.float64)
+        pred_np    = pred[i].cpu().numpy()
 
-        def make_pcd(points, color):
-            pcd = o3d.geometry.PointCloud()
-            pcd.points = o3d.utility.Vector3dVector(points)
-            pcd.paint_uniform_color(color)
-            return pcd
+        partial_np = partial_np.reshape(-1, 3).astype(np.float64)
+        pred_np    = pred_np.reshape(-1, 3).astype(np.float64)
 
-        pcd_left = make_pcd(partial_np, [0.7, 0.7, 0.7])
-        pcd_right = make_pcd(pred_np, [1.0, 0.0, 0.0])
+        pcd_left  = make_pcd(partial_np, [0.7, 0.7, 0.7])
+        pcd_right = make_pcd(pred_np,    [1.0, 0.0, 0.0])
 
-        # Shift them apart along X so they appear side‑by‑side
-        pcd_left.translate((-1.0, 0, 0))
-        pcd_right.translate(( 1.0, 0, 0))
-
+        pcd_left.translate((-0.5, 0, 0))
+        pcd_right.translate(( 0.5, 0, 0))
         o3d.visualization.draw_geometries([pcd_left, pcd_right])
+
+
 
 

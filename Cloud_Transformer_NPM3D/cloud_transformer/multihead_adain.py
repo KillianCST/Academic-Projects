@@ -4,6 +4,7 @@ from torch.utils.checkpoint import checkpoint
 from cloud_transformer.core import Splat, Slice, DifferentiablePositions
 from cloud_transformer.utils_ct import PlaneTransformer, VolTransformer, AdaIn1dUpd
 
+
 def _apply_style(module: nn.Sequential, x: torch.Tensor, style: torch.Tensor) -> torch.Tensor:
     """Apply style-conditioned layers in a sequential module."""
     for layer in module:
@@ -12,6 +13,7 @@ def _apply_style(module: nn.Sequential, x: torch.Tensor, style: torch.Tensor) ->
         else:
             x = layer(x)
     return x
+
 
 class MultiHeadAdaIn(nn.Module):
     def __init__(self,
@@ -61,7 +63,6 @@ class MultiHeadAdaIn(nn.Module):
         )
         self.transform = VolTransformer(num_heads, scales=use_scales) if grid_dim == 3 else PlaneTransformer(num_heads, scales=use_scales)
 
-
     def _forward_body(self, x: torch.Tensor, orig_points: torch.Tensor, style: torch.Tensor):
         kv = self.kv_conv(x)
         keys_offset = self.keys_bn(kv[:, :self.num_heads * 3], style)
@@ -78,17 +79,15 @@ class MultiHeadAdaIn(nn.Module):
         sliced = self.slice(local_coord, flattened_index, conv_out)
         result = _apply_style(self.after, sliced, style)
 
-        with torch.no_grad():
-            occupancy = (torch.abs(splat_out) > 1e-9).sum().float() / (keys.size(0) * self.attention_feature_dim * self.num_heads)
-            stats = (occupancy, torch.mean(keys).detach(), torch.var(keys).detach(), None)
-        return result, stats, lattice
+        return result
 
-    def forward(self, x: torch.Tensor, orig_points: torch.Tensor, style: torch.Tensor, return_lattice: bool = False):
+    def forward(self, x: torch.Tensor, orig_points: torch.Tensor, style: torch.Tensor):
         if self.use_checkpoint and self.training:
-            result, stats, lattice = checkpoint(self._forward_body, x, orig_points, style, use_reentrant=False)
+            result = checkpoint(self._forward_body, x, orig_points, style, use_reentrant=False)
         else:
-            result, stats, lattice = self._forward_body(x, orig_points, style)
-        return (result, lattice) if return_lattice else (result, stats)
+            result = self._forward_body(x, orig_points, style)
+        return result
+
 
 class MultiHeadUnionAdaIn(nn.Module):
     def __init__(self,
@@ -119,15 +118,10 @@ class MultiHeadUnionAdaIn(nn.Module):
                            n_latent=n_latent, use_scales=use_scales, use_checkpoint=use_checkpoint)
             for feat_dim, grid_size, grid_dim, heads in zip(feature_dims, grid_sizes, grid_dims, num_heads_list)
         ])
-     
 
     def forward(self, x: torch.Tensor, orig_points: torch.Tensor, style: torch.Tensor):
         residual = _apply_style(self.shortcut, x, style) if len(self.shortcut) > 0 else x
-        outputs, stats_list = [], []
-        for attention in self.attentions:
-            out, stats = attention(x, orig_points, style)
-            outputs.append(out)
-            stats_list.append(stats)
+        outputs = [attention(x, orig_points, style) for attention in self.attentions]
         concat = torch.cat(outputs, dim=1)
         gathered = _apply_style(self.after, concat, style)
-        return residual + gathered, stats_list
+        return residual + gathered

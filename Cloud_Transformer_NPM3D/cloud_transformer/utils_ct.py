@@ -3,6 +3,7 @@ import numpy as np
 import torch.nn as nn
 from pytorch3d.transforms.so3 import so3_exponential_map
 
+
 def trilinear_coords(keys):
     assert (keys.shape[1] == 3)
 

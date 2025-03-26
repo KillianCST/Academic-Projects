@@ -1,7 +1,5 @@
 import torch
 from torch import nn
-
-from torch.nn.init import xavier_uniform_, constant_
 from cloud_transformer.ResBlock.v2v_groups import Res3DBlock, Pool3DBlock
 from cloud_transformer.ResBlock.unet_parts import Res2DBlock
 from cloud_transformer.multihead_union import MultiHeadUnionAttention
@@ -28,7 +26,7 @@ class CT_Encoder(nn.Module):
             [branch for _ in range(self.num_layers) for branch in [
                 MultiHeadUnionAttention(
                     input_dim=self.model_dim,
-                    features_dims=[4, 4],
+                    feature_dims=[4, 4],
                     num_heads_list=[self.heads, self.heads],
                     grid_sizes=[64, 16],
                     grid_dims=[2, 3],
@@ -38,7 +36,7 @@ class CT_Encoder(nn.Module):
                 ),
                 MultiHeadUnionAttention(
                     input_dim=self.model_dim,
-                    features_dims=[4 * 4, 4 * 4],
+                    feature_dims=[4 * 4, 4 * 4],
                     num_heads_list=[self.heads, self.heads],
                     grid_sizes=[32, 8],
                     grid_dims=[2, 3],
@@ -48,7 +46,7 @@ class CT_Encoder(nn.Module):
                 ),
                 MultiHeadUnionAttention(
                     input_dim=self.model_dim,
-                    features_dims=[4 * 4, 4 * 8],
+                    feature_dims=[4 * 4, 4 * 8],
                     num_heads_list=[self.heads, self.heads],
                     grid_sizes=[8, 4],
                     grid_dims=[2, 3],
@@ -103,31 +101,19 @@ class CT_Encoder(nn.Module):
             nn.ReLU(inplace=True)
         )
 
-      
-
-    def _reset_parameters(self):
-        for m in self.modules():
-            if isinstance(m, (nn.Conv1d, nn.Conv2d, nn.Conv3d, nn.Linear)):
-                xavier_uniform_(m.weight)
-                if m.bias is not None:
-                    constant_(m.bias, 0)
-            elif isinstance(m, (nn.BatchNorm1d, nn.BatchNorm2d, nn.BatchNorm3d)):
-                constant_(m.weight, 1)
-                constant_(m.bias, 0)
-
     def forward(self, x):
         x = x.permute(0, 2, 1)
         orig = x
 
         x = self.first_process(x)
         for attention in self.attentions_encoder:
-            x, _ = attention(x, orig)
+            x = attention(x, orig)
 
         B = x.size(0)
-        x3d, _ = self.pool3d(x, orig)
+        x3d = self.pool3d(x, orig)
         x3d = self.after_pool3d(x3d).view(B, -1)
 
-        x2d, _ = self.pool2d(x, orig)
+        x2d = self.pool2d(x, orig)
         x2d = self.after_pool2d(x2d).view(B, -1)
 
         latent_feature = self.class_vector(torch.cat([x2d, x3d], dim=-1))
@@ -214,18 +200,6 @@ class CT_Completion(nn.Module):
             nn.Conv1d(in_channels=model_dim, out_channels=3, kernel_size=1)
         )
 
-        
-
-    def _reset_parameters(self):
-        for m in self.modules():
-            if isinstance(m, (nn.Conv1d, nn.Conv2d, nn.Conv3d, nn.Linear)):
-                xavier_uniform_(m.weight)
-                if m.bias is not None:
-                    constant_(m.bias, 0)
-            elif isinstance(m, (nn.BatchNorm1d, nn.BatchNorm2d, nn.BatchNorm3d)):
-                constant_(m.weight, 1)
-                constant_(m.bias, 0)
-
     def forward(self, noise, input):
         # Encoder branch: input shape (B, P, 3)
         latent_feature = self.encoder(input)
@@ -242,7 +216,7 @@ class CT_Completion(nn.Module):
 
         # Decoder
         for decoder_attention in self.attentions_decoder:
-            x_dec, _ = decoder_attention(x_dec, orig_points, latent_style)
+            x_dec = decoder_attention(x_dec, orig_points, latent_style)
             
        
         # Final reconstruction
