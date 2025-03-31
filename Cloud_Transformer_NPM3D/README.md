@@ -1,4 +1,4 @@
-![Cloud Completion](cloud_completion.png)
+# Cloud Transformers: A Universal Approach to Point Cloud Processing Tasks
 
 This repository contains a PyTorch implementation of **Cloud Transformers**, based on the paper:
 
@@ -22,3 +22,7 @@ The datasets used in this project are **not** included in this repository.
 If you would like access, feel free to contact me at:
 
 📬 **Coustoulin.Killian@gmail.com**
+
+---
+
+![Cloud Completion](cloud_completion.png)
